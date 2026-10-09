@@ -79,7 +79,204 @@
 
 ## Пользовательские сценарии
 
-//TODO
+### Сценарий: отправка письма внутри системы
+
+1. Клиент отправляет в API Gateway запрос POST /messages с параметрами: recipient, subject, body и идемпотентный ключ (Message-ID, генерируется клиентом).
+2. API Gateway перенаправляет запрос в сервис Mail.
+3. Инстанс Mail по локальной копии хеш-кольца определяет шарды отправителя и получателя (хеш от userId).
+4. В одной транзакции на шарде отправителя письмо записывается в папку «Отправленных», на шарде получателя — в папку «Входящих» (за исключением внешнего получателя — тогда исходящая очередь), и в outbox-таблицу записывается событие message.received.
+5. Mail сообщает API Gateway об успешной отправке, API Gateway возвращает клиенту ответ.
+6. Асинхронно: событие из outbox пересылается в Message Broker (at-least-once); Analytics дедуплицирует его по eventId и обновляет Analytics DB.
+7. Повторный запрос с тем же Message-ID: Mail находит существующее письмо и возвращает результат первой операции без второй копии.
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant APIGateway
+  participant Mail
+  participant ShardA
+  participant ShardB
+  participant MessageBroker
+  participant Analytics
+  participant AnalyticsDB
+
+  Client->>APIGateway: POST /messages (recipient, subject, body, Message-ID)
+  APIGateway->>Mail: Запрос отправки
+  Mail->>Mail: Определить шарды отправителя и получателя по хеш-кольцу
+  Mail->>ShardA: Письмо в «Отправленных» + событие в outbox — одна транзакция
+  ShardA-->>Mail: OK
+  Mail->>ShardB: Письмо во «Входящих» (идемпотентно по Message-ID)
+  ShardB-->>Mail: OK
+  Mail-->>APIGateway: Успех
+  APIGateway-->>Client: Письмо отправлено
+  Note over Mail,Analytics: Асинхронно, at-least-once
+  Mail->>MessageBroker: Событие message.received (eventId)
+  MessageBroker->>Analytics: Доставка события
+  Analytics->>Analytics: Дедупликация по eventId
+  Analytics->>AnalyticsDB: Обновить статистику
+  Client->>APIGateway: Повтор запроса с тем же Message-ID
+  APIGateway->>Mail: Запрос отправки
+  Mail->>ShardA: Найти письмо (Message-ID)
+  ShardA-->>Mail: Результат первой операции
+  Mail-->>Client: Письмо отправлено (без второй копии)
+```
+
+### Сценарий: приём входящего письма и классификация спама
+
+1. Внешний почтовый сервер отправляет письмо по SMTP на SMTP Gateway (MX-запись домена).
+2. SMTP Gateway передаёт письмо в сервис Mail; Mail проверяет Message-ID на идемпотентность.
+3. Mail вызывает SpamFilter с таймаутом 100 мс; SpamFilter выполняет инференс опубликованной моделью из Model Registry и возвращает класс и вероятность.
+4. Если вероятность спама выше порога — письмо записывается в папку «Спам», иначе — во «Входящие»; в той же транзакции в outbox пишется событие message.classified.
+5. Если SpamFilter не ответил за таймаут — письмо доставляется во «Входящие» с пометкой «непроверено» (fail-open), а асинхронный повтор классификации при результате перемещает письмо в «Спам».
+6. SMTP Gateway отвечает внешнему серверу 250 OK — письмо принято.
+
+```mermaid
+sequenceDiagram
+  participant ExternalMTA as Внешний сервер
+  participant SMTPGateway
+  participant Mail
+  participant SpamFilter
+  participant ModelRegistry
+  participant Shard
+
+  ExternalMTA->>SMTPGateway: SMTP: DATA (Message-ID, From, To, Body)
+  SMTPGateway->>Mail: Передать письмо
+  Mail->>Mail: Проверка идемпотентности по Message-ID
+  Mail->>SpamFilter: Классифицировать письмо (таймаут 100 мс)
+  SpamFilter->>ModelRegistry: Загрузить текущую версию модели
+  ModelRegistry-->>SpamFilter: Версия v3
+  SpamFilter-->>Mail: Класс (спам/не спам), вероятность
+  alt Вероятность спама ≥ порога
+    Mail->>Shard: Записать в «Спам» + событие в outbox
+  else Легитимное письмо
+    Mail->>Shard: Записать во «Входящие» + событие в outbox
+  end
+  SMTPGateway-->>ExternalMTA: 250 OK
+  Note over Mail,SpamFilter: Отказ SpamFilter → fail-open
+  Mail--xSpamFilter: Таймаут
+  Mail->>Shard: Записать во «Входящие» с пометкой «непроверено»
+  Mail->>SpamFilter: Асинхронный повтор классификации
+  SpamFilter-->>Mail: Класс
+  Mail->>Shard: При необходимости переместить в «Спам»
+```
+
+### Сценарий: обратная связь пользователя и переобучение модели
+
+1. Пользователь открывает письмо в папке «Спам» и нажимает «Не спам» (или наоборот — «Спам» во «Входящих»).
+2. Клиент отправляет в API Gateway запрос POST /messages/{messageId}/labels с меткой.
+3. API Gateway перенаправляет запрос в Mail; Mail перемещает письмо в нужную папку и в одной транзакции записывает событие user.feedback в outbox.
+4. Событие доставляется в Message Broker (at-least-once), Analytics дедуплицирует его по eventId и накапливает разметку в Analytics DB.
+5. По расписанию Trainer забирает разметку из Analytics DB, дообучает модель и оценивает её на контрольном наборе.
+6. Если метрики прошли приёмку (precision ≥ 0.95) — Trainer публикует версию в Model Registry; SpamFilter подхватывает её без перезапуска.
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant APIGateway
+  participant Mail
+  participant Shard
+  participant MessageBroker
+  participant Analytics
+  participant AnalyticsDB
+  participant Trainer
+  participant ModelRegistry
+  participant SpamFilter
+
+  Client->>APIGateway: POST /messages/{id}/labels (метка: spam / not_spam)
+  APIGateway->>Mail: Разметить письмо
+  Mail->>Shard: Переместить письмо + событие user.feedback в outbox (одна транзакция)
+  Mail-->>Client: Готово
+  Note over Mail,Trainer: Асинхронно, at-least-once
+  Mail->>MessageBroker: Событие user.feedback (eventId)
+  MessageBroker->>Analytics: Доставка события
+  Analytics->>Analytics: Дедупликация по eventId
+  Analytics->>AnalyticsDB: Накопить разметку
+  Trainer->>AnalyticsDB: Забрать разметку
+  Trainer->>Trainer: Дообучение + оценка на контрольном наборе
+  Trainer->>ModelRegistry: Публикация новой версии (precision ≥ 0.95)
+  ModelRegistry-->>SpamFilter: Новая версия доступна
+  SpamFilter->>SpamFilter: Подхватить версию без перезапуска
+```
+
+### Сценарий: просмотр панели метрик ML-модели
+
+1. Пользователь открывает страницу метрик, отправляя GET /metrics/model?window=24h.
+2. API Gateway перенаправляет запрос в сервис Analytics.
+3. Analytics выполняет агрегирующие запросы к Analytics DB: precision/recall за окно, долю спама во входящем потоке, распределение предсказаний по версиям модели.
+4. API Gateway возвращает клиенту ответ со списком метрик.
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant APIGateway
+  participant Analytics
+  participant AnalyticsDB
+
+  Client->>APIGateway: GET /metrics/model?window=24h
+  APIGateway->>Analytics: Запрос метрик модели
+  Analytics->>AnalyticsDB: SELECT precision, recall, spam_rate, version ... WHERE ts > now() - 24h
+  AnalyticsDB-->>Analytics: Агрегаты
+  Analytics-->>APIGateway: Метрики (content)
+  APIGateway-->>Client: 200 OK (метрики)
+```
+
+### Сценарий: отказ мастера шарда
+
+1. Во время обработки запросов мастер одного из шардов Mail DB перестаёт отвечать.
+2. Инстанс Mail не получает ответ в течение таймаута и проверяет узел health-запросом; мастер недоступен.
+3. Система продвигает реплику шарда в новый мастер и изолирует старый мастер (fencing), исключающий его записи.
+4. Инстанс Mail повторяет операцию к новому мастеру (retry).
+5. Клиентская операция завершается успешно; задержка ограничена временем детекции и переключения.
+
+```mermaid
+sequenceDiagram
+  participant Client
+  participant APIGateway
+  participant Mail
+  participant Master
+  participant Replica
+
+  Client->>APIGateway: Запрос операции (например, отправка письма)
+  APIGateway->>Mail: Операция
+  Mail->>Master: Запрос к шарду
+  Master--xMail: Таймаут — нет ответа
+  Mail->>Master: Health-проверка
+  Master--xMail: Недоступен
+  Mail->>Replica: Продвижение в мастера + fencing старого мастера
+  Replica-->>Mail: Новый мастер готов
+  Mail->>Replica: Повтор операции (retry)
+  Replica-->>Mail: OK
+  Mail-->>APIGateway: Успех
+  APIGateway-->>Client: Операция выполнена
+```
+
+### Сценарий: потеря и повторная доставка события
+
+1. После доставки письма событие message.received записано в outbox-таблицу шарда.
+2. Message Broker временно недоступен — отправка события не подтверждается.
+3. Отправитель outbox повторяет отправку до подтверждения — семантика at-least-once.
+4. В результате брокер может доставить событие в Analytics более одного раза.
+5. Analytics распознаёт повтор по eventId (дедупликация) и отбрасывает дубликат.
+6. Метрики сходятся к полному состоянию без дублей — eventual consistency.
+
+```mermaid
+sequenceDiagram
+  participant Mail
+  participant Outbox
+  participant MessageBroker
+  participant Analytics
+  participant AnalyticsDB
+
+  Mail->>Outbox: Событие message.received (eventId) — в транзакции с записью письма
+  Outbox->>MessageBroker: Отправка события
+  MessageBroker--xOutbox: Недоступен, подтверждения нет
+  Outbox->>MessageBroker: Повторная отправка (retry)
+  MessageBroker-->>Outbox: Подтверждение
+  MessageBroker->>Analytics: Доставка события (возможен дубль)
+  Analytics->>Analytics: Дедупликация по eventId
+  Analytics->>AnalyticsDB: Обновление статистики без дублей
+  Note over Analytics: Метрики сходятся — eventual consistency
+```
 
 ---
 
