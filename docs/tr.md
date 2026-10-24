@@ -236,7 +236,7 @@ sequenceDiagram
   APIGateway-->>Client: Запрос принят
   Mail->>ShardB: Записать во «Входящие» по Message-ID
   ShardB-->>Mail: OK
-  Mail->>ShardB: Пометить задание выполненным
+  Mail->>ShardA: Пометить задание выполненным
   Mail->>MessageBroker: Событие message.delivered (eventId)
   MessageBroker->>Analytics: Доставка события (at-least-once)
   Analytics->>Analytics: Дедупликация по eventId
