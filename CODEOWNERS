@@ -3,3 +3,6 @@
 /docs/ @spbu-ds-practicum-2026/curators
 CODEOWNERS @spbu-ds-practicum-2026/curators
 .github @spbu-ds-practicum-2026/curators
+
+/services/database/     @YennOfVengerberg
+/services/coordinator/  @YennOfVengerberg

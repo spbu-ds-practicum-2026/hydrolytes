@@ -1,0 +1,13 @@
+{
+  "state_file": "C:/pgstand/stand_state.json",
+  "check_interval": 1,
+  "failures_before_promote": 3,
+  "shards": [
+    {
+      "name": "shard1",
+      "master_port": 5433,
+      "replica_port": 5434,
+      "replica_datadir": "C:/pgstand/shard1-replica"
+    }
+  ]
+}

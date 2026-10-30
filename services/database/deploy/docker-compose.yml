@@ -1,0 +1,114 @@
+# Стенд «почтовый сервер» в контейнерах: имитация четырёх устройств на одной машине.
+#
+# ВАЖНО: host-порты начинаются с 6432, чтобы не конфликтовать с установленной
+# на Windows службой PostgreSQL (она держит 5432) и с ручным стендом (5433/5434).
+#
+#   узел A: master-shard1 (6432) + replica-shard2 (6435)
+#   узел B: master-shard2 (6433) + replica-shard1 (6434)
+#
+# Запуск:  docker compose up -d
+# Статус:  docker compose ps
+# Логи:    docker compose logs -f master-shard1
+
+services:
+  # ---------- Узел A ----------
+  master-shard1:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: >
+      postgres -p 5432
+      -c wal_level=replica
+      -c max_wal_senders=10
+      -c wal_keep_size=256MB
+      -c listen_addresses=*
+      -c synchronous_commit=remote_apply
+      -c synchronous_standby_names=replica_1
+    ports:
+      - "6432:5432"
+    volumes:
+      - master1-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -h localhost -p 5432"]
+      interval: 3s
+      retries: 20
+
+  # Реплика шарда 2 живёт на узле A (мастер шарда 2 — на узле B)
+  replica-shard2:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      PGPASSWORD: postgres
+    depends_on:
+      master-shard2:
+        condition: service_healthy
+    user: postgres
+    entrypoint: >
+      bash -c '
+      set -e;
+      if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+        until pg_isready -h master-shard2 -p 5432 -U postgres; do sleep 1; done;
+        pg_basebackup -h master-shard2 -p 5432 -U postgres
+          -D /var/lib/postgresql/data -R -X stream -S replica_2;
+        sed -i "s/^primary_conninfo = .*/& application_name=replica_2/" /var/lib/postgresql/data/postgresql.auto.conf;
+      fi;
+      exec postgres -D /var/lib/postgresql/data -p 5432'
+    ports:
+      - "6435:5432"
+    volumes:
+      - replica2-data:/var/lib/postgresql/data
+
+  # ---------- Узел B ----------
+  master-shard2:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: >
+      postgres -p 5432
+      -c wal_level=replica
+      -c max_wal_senders=10
+      -c wal_keep_size=256MB
+      -c listen_addresses=*
+      -c synchronous_commit=remote_apply
+      -c synchronous_standby_names=replica_2
+    ports:
+      - "6433:5432"
+    volumes:
+      - master2-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -h localhost -p 5432"]
+      interval: 3s
+      retries: 20
+
+  # Реплика шарда 1 живёт на узле B
+  replica-shard1:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      PGPASSWORD: postgres
+    depends_on:
+      master-shard1:
+        condition: service_healthy
+    user: postgres
+    entrypoint: >
+      bash -c '
+      set -e;
+      if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+        until pg_isready -h master-shard1 -p 5432 -U postgres; do sleep 1; done;
+        pg_basebackup -h master-shard1 -p 5432 -U postgres
+          -D /var/lib/postgresql/data -R -X stream -S replica_1;
+        sed -i "s/^primary_conninfo = .*/& application_name=replica_1/" /var/lib/postgresql/data/postgresql.auto.conf;
+      fi;
+      exec postgres -D /var/lib/postgresql/data -p 5432'
+    ports:
+      - "6434:5432"
+    volumes:
+      - replica1-data:/var/lib/postgresql/data
+
+volumes:
+  master1-data:
+  master2-data:
+  replica1-data:
+  replica2-data:
