@@ -30,6 +30,15 @@ python --version            # нужен 3.9+
 python coordinator.py --config ..\database\deploy\stand.json
 ```
 
+Координатор ищет PostgreSQL в `PATH`, затем в `C:\Program Files\PostgreSQL\16\bin`
+(также проверяются версии 17, 15 и 14). Для нестандартной установки задайте путь к
+каталогу `bin`:
+
+```powershell
+$env:PG_BIN = "D:\tools\postgresql\16\bin"
+python coordinator.py --config ..\database\deploy\stand.json
+```
+
 Ожидаемый вывод в спокойном состоянии:
 
 ```

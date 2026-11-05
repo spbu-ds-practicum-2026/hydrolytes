@@ -1,12 +1,16 @@
 {
   "state_file": "C:/pgstand/stand_state.json",
-  "check_interval": 1,
+  "check_interval": 4,
   "failures_before_promote": 3,
+  "pg_bin": "D:/Postgre/bin",
+  "return_script": "D:/vs/spbu/Dispersed_calcs/hydrolytes/services/database/deploy/scripts/return_node.ps1",
+  "return_slot": "replica_1",
   "shards": [
     {
       "name": "shard1",
       "master_port": 5433,
       "replica_port": 5434,
+      "master_datadir": "C:/pgstand/shard1",
       "replica_datadir": "C:/pgstand/shard1-replica"
     }
   ]
