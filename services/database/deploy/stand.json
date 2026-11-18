@@ -12,6 +12,13 @@
       "replica_port": 5434,
       "master_datadir": "C:/pgstand/shard1",
       "replica_datadir": "C:/pgstand/shard1-replica"
+    },
+    {
+      "name": "shard2",
+      "master_port": 6433,
+      "replica_port": 6434,
+      "master_datadir": "C:/pgstand/shard2",
+      "replica_datadir": "C:/pgstand/shard2-replica"
     }
   ]
 }

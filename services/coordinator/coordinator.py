@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 
+os.environ.setdefault("PGUSER", "postgres")
 
 def pg_bindir() -> str:
     out = subprocess.run(["pg_config", "--bindir"], capture_output=True, text=True)
@@ -27,7 +28,7 @@ def pg_bindir() -> str:
 def is_alive(port: int) -> bool:
     """pg_isready — дешёвая проверка «процесс принимает подключения»."""
     r = subprocess.run(
-        [os.path.join(pg_bindir(), "pg_isready"), "-h", "127.0.0.1", "-p", str(port)],
+        [os.path.join(pg_bindir(), "pg_isready"), "-h", "127.0.0.1", "-p", str(port), "-U", "postgres"],
         capture_output=True,
         text=True,
     )
